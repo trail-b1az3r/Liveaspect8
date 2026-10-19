@@ -21,18 +21,18 @@ jobs:
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
-      - name: Build and verify dylib
+      - name: Build and verify dylibs
         run: bash build.sh
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LiveAspect8-dylib
-          path: build/LiveAspect8.dylib
+          name: dylibs
+          path: build/*.dylib
           if-no-files-found: error
 
       - name: Attach to release (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/LiveAspect8.dylib
+          files: build/*.dylib
