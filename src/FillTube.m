@@ -12,7 +12,8 @@
 // Nothing here uses offsets or private headers: every YouTube class and
 // selector is looked up by name at runtime and skipped if missing, so a
 // rename in a newer YouTube build degrades one feature instead of crashing.
-// A one-time view-hierarchy dump and a summary line are written with NSLog.
+// A summary line and a one-time view-hierarchy dump go to NSLog and to
+// Documents/FillTube.log (readable through the Files app, no Mac needed).
 //
 // Build with -fno-objc-arc (see build.sh).
 
@@ -24,6 +25,10 @@
 #include <strings.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <time.h>
+#include <mach-o/dyld.h>
 
 #define kKeyStretch   @"FillTube.stretch"
 #define kKeyNoCC      @"FillTube.noCaptions"
@@ -40,6 +45,32 @@ static BOOL gDumped = NO;
 
 static const void *kVideoViewKey = &kVideoViewKey;
 static const void *kTagKey       = &kTagKey;
+
+#pragma mark - Logging (NSLog + Documents/FillTube.log, no Mac needed)
+
+static void FTLog(NSString *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    NSString *msg = [[[NSString alloc] initWithFormat:fmt arguments:ap] autorelease];
+    va_end(ap);
+    NSLog(@"%@", msg);
+
+    static NSString *path = nil;
+    static BOOL started = NO;
+    if (!path) {
+        NSArray *d = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        path = [[[d firstObject] stringByAppendingPathComponent:@"FillTube.log"] retain];
+    }
+    if (!path) return;
+    FILE *f = fopen([path UTF8String], started ? "a" : "w");   // each launch starts a fresh log
+    if (!f) return;
+    started = YES;
+    time_t t = time(NULL);
+    char ts[16];
+    strftime(ts, sizeof ts, "%H:%M:%S", localtime(&t));
+    fprintf(f, "%s %s\n", ts, [msg UTF8String]);
+    fclose(f);
+}
 
 #pragma mark - Small helpers
 
@@ -102,7 +133,7 @@ static BOOL HookVoid(Class cls, SEL sel, void (*before)(id), void (*after)(id)) 
 #pragma mark - Stretch to fill
 
 static void DumpTree(UIView *v, int depth, int maxDepth) {
-    NSLog(@"[FillTube]   %*s%@ %@ hidden=%d", depth * 2, "",
+    FTLog(@"[FillTube]   %*s%@ %@ hidden=%d", depth * 2, "",
           NSStringFromClass([v class]), NSStringFromCGRect(v.frame), (int)v.hidden);
     if (depth >= maxDepth) return;
     for (UIView *s in v.subviews) DumpTree(s, depth + 1, maxDepth);
@@ -164,7 +195,7 @@ static void PlayerAfter(id obj) {
 
     if (!gDumped && b.width > b.height && b.height > 1) {
         gDumped = YES;
-        NSLog(@"[FillTube] player view %@ bounds=%@ videoView=%@",
+        FTLog(@"[FillTube] player view %@ bounds=%@ videoView=%@",
               NSStringFromClass([pv class]), NSStringFromCGSize(b),
               vv ? NSStringFromClass([vv class]) : @"NOT FOUND");
         DumpTree(pv, 0, 3);
@@ -404,7 +435,7 @@ static void BuildSection(id mgr) {
         SEL sw  = sel_registerName("switchItemWithTitle:titleDescription:accessibilityIdentifier:switchOn:switchBlock:settingItemId:");
         SEL set = sel_registerName("setSectionItems:forCategory:title:icon:titleDescription:headerHidden:");
         if (!vc || !itemCls || ![itemCls respondsToSelector:sw] || ![vc respondsToSelector:set]) {
-            NSLog(@"[FillTube] settings: required selectors missing (vc=%d item=%d)", vc != nil, itemCls != Nil);
+            FTLog(@"[FillTube] settings: required selectors missing (vc=%d item=%d)", vc != nil, itemCls != Nil);
             return;
         }
         NSMutableArray *rows = [NSMutableArray array];
@@ -417,17 +448,21 @@ static void BuildSection(id mgr) {
         ((void (*)(id, SEL, id, NSUInteger, id, id, id, BOOL))objc_msgSend)(
             vc, set, rows, (NSUInteger)kSettingsCat, kTweakName, nil, nil, NO);
     } @catch (NSException *e) {
-        NSLog(@"[FillTube] settings build failed: %@", e);
+        FTLog(@"[FillTube] settings build failed: %@", e);
     }
 }
 
+static BOOL gHk[4];
+
+static int SettingsHooked(void) { return gHk[0] + gHk[1] + gHk[2] + gHk[3]; }
+
+// Safe to call repeatedly: each hook is installed once, as soon as its class exists.
 static int HookSettings(void) {
-    int hooks = 0;
 
     // 1) add our category to the settings list
     SEL catSel = sel_registerName("settingsCategoryOrder");
     Class pd = objc_getClass("YTAppSettingsPresentationData");
-    if (pd) {
+    if (!gHk[0] && pd) {
         Class meta = object_getClass(pd);
         Method m = class_getInstanceMethod(meta, catSel);
         if (m) {
@@ -442,14 +477,14 @@ static int HookSettings(void) {
                 else [out addObject:mine];
                 return out;
             }));
-            hooks++;
+            gHk[0] = YES;
         }
     }
 
     // 2) build our section when YouTube asks for it
     SEL updSel = sel_registerName("updateSectionForCategory:withEntry:");
     Class mgr = objc_getClass("YTSettingsSectionItemManager");
-    if (mgr) {
+    if (!gHk[1] && mgr) {
         Method m = class_getInstanceMethod(mgr, updSel);
         if (m) {
             void (*orig)(id, SEL, NSUInteger, id) = (void (*)(id, SEL, NSUInteger, id))method_getImplementation(m);
@@ -457,29 +492,29 @@ static int HookSettings(void) {
                 if (cat == kSettingsCat) { BuildSection(obj); return; }
                 orig(obj, updSel, cat, entry);
             }));
-            hooks++;
+            gHk[1] = YES;
         }
     }
 
     // 3) YouTube asserts on unknown selection indexes
     SEL selSel = sel_registerName("setSelectedItem:");
     Class sc = objc_getClass("YTSettingsSectionController");
-    if (sc) {
+    if (!gHk[2] && sc) {
         Method m = class_getInstanceMethod(sc, selSel);
         if (m) {
             void (*orig)(id, SEL, NSUInteger) = (void (*)(id, SEL, NSUInteger))method_getImplementation(m);
             Install(sc, m, selSel, imp_implementationWithBlock(^(id obj, NSUInteger i) {
                 if (i != NSNotFound) orig(obj, selSel, i);
             }));
-            hooks++;
+            gHk[2] = YES;
         }
     }
 
     // 4) icons on our rows
-    if (HookVoid(objc_getClass("YTSettingsCell"), sel_registerName("layoutSubviews"), NULL, SettingsCellAfter)) {
-        hooks++;
+    if (!gHk[3] && HookVoid(objc_getClass("YTSettingsCell"), sel_registerName("layoutSubviews"), NULL, SettingsCellAfter)) {
+        gHk[3] = YES;
     }
-    return hooks;
+    return SettingsHooked();
 }
 
 #pragma mark - Refresh after a toggle
@@ -499,25 +534,81 @@ static void RefreshAll(void) {
 
 #pragma mark - Entry point
 
+// LiveContainer may run this constructor before YouTube's own classes are
+// loaded, so installation is retried (image loads, timers) until it sticks.
+static BOOL gGateOK = NO, gPlayerHooked = NO, gButtonsHooked = NO, gScanned = NO, gPending = NO;
+static int  gCaptionViews = 0, gBoolHooks = 0, gAttempts = 0, gLastSum = -1;
+
+static BOOL AllDone(void) {
+    return gGateOK && gPlayerHooked && gScanned && SettingsHooked() == 4;
+}
+
+static void InstallAll(const char *why) {
+    @autoreleasepool {
+        gAttempts++;
+        if (!gGateOK) {
+            NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+            if (!TextHas(bid, "youtube") && !objc_getClass("YTPlayerView")) {
+                if (gAttempts <= 2) FTLog(@"[FillTube] waiting (%s): bundle=%@ is not YouTube yet", why, bid);
+                return;
+            }
+            gGateOK = YES;
+            LoadPrefs();
+            gCaptionClasses = [[NSMutableArray alloc] init];
+            FTLog(@"[FillTube] gate passed (%s) bundle=%@", why, bid);
+        }
+
+        SEL layoutSel = sel_registerName("layoutSubviews");
+        if (!gPlayerHooked) {
+            Class pv = objc_getClass("YTPlayerView");
+            if (pv) {
+                gPlayerViewClass = pv;
+                gPlayerHooked = HookVoid(pv, layoutSel, PlayerBefore, PlayerAfter);
+            }
+        }
+        if (!gButtonsHooked) gButtonsHooked = HookVoid([UIButton class], layoutSel, NULL, ButtonAfter);
+        int settings = HookSettings();
+        if (!gScanned && objc_getClass("YTPlayerView")) {
+            gScanned = YES;
+            ScanClasses(&gCaptionViews, &gBoolHooks);
+        }
+
+        int sum = gPlayerHooked + gButtonsHooked + settings + gScanned * 100 + gCaptionViews + gBoolHooks;
+        if (sum != gLastSum) {
+            gLastSum = sum;
+            FTLog(@"[FillTube] state (%s, attempt %d): stretch=%d noCC=%d | YTPlayerView=%d buttons=%d "
+                  @"settingsHooks=%d/4 captionViews=%d captionStateHooks=%d | classes: "
+                  @"PresentationData=%d ItemManager=%d SectionController=%d Cell=%d Item=%d",
+                  why, gAttempts, gStretch, gNoCC, gPlayerHooked, gButtonsHooked,
+                  settings, gCaptionViews, gBoolHooks,
+                  objc_getClass("YTAppSettingsPresentationData") != Nil,
+                  objc_getClass("YTSettingsSectionItemManager") != Nil,
+                  objc_getClass("YTSettingsSectionController") != Nil,
+                  objc_getClass("YTSettingsCell") != Nil,
+                  objc_getClass("YTSettingsSectionItem") != Nil);
+        }
+    }
+}
+
+static void ImageAdded(const struct mach_header *mh, intptr_t slide) {
+    if (gPending || AllDone()) return;
+    gPending = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        gPending = NO;
+        if (!AllDone()) InstallAll("image");
+    });
+}
+
 __attribute__((constructor))
 static void FillTube_init(void) {
-    @autoreleasepool {
-        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-        if (!TextHas(bid, "youtube") && !objc_getClass("YTPlayerView")) return;  // YouTube only
-
-        LoadPrefs();
-        gCaptionClasses = [[NSMutableArray alloc] init];
-
-        gPlayerViewClass = objc_getClass("YTPlayerView");
-        SEL layoutSel = sel_registerName("layoutSubviews");
-        BOOL player  = HookVoid(gPlayerViewClass, layoutSel, PlayerBefore, PlayerAfter);
-        BOOL buttons = HookVoid([UIButton class], layoutSel, NULL, ButtonAfter);
-        int settings = HookSettings();
-        int captionViews = 0, boolHooks = 0;
-        ScanClasses(&captionViews, &boolHooks);
-
-        NSLog(@"[FillTube] loaded bundle=%@ stretch=%d noCC=%d | playerView=%d buttons=%d "
-              @"settingsHooks=%d/4 captionViews=%d captionStateHooks=%d",
-              bid, gStretch, gNoCC, player, buttons, settings, captionViews, boolHooks);
+    FTLog(@"[FillTube] constructor ran (log file: Documents/FillTube.log)");
+    InstallAll("ctor");
+    _dyld_register_func_for_add_image(ImageAdded);
+    static const int delays[] = {1, 2, 4, 8, 15};
+    for (int i = 0; i < 5; i++) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)delays[i] * NSEC_PER_SEC),
+                       dispatch_get_main_queue(), ^{
+            if (!AllDone()) InstallAll("timer");
+        });
     }
 }

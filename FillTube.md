@@ -14,13 +14,16 @@ Enable `FillTube.dylib` only for the YouTube app in LiveContainer (not `LiveAspe
 
 ## If something doesn't work
 
-Every YouTube class and selector is looked up by name at runtime and skipped when missing. On launch the tweak logs one summary line and, on the first landscape player, the player view hierarchy:
+Every YouTube class and selector is looked up by name at runtime and skipped when missing. Installation is retried for ~15 s after launch because LiveContainer can load tweaks before YouTube's classes exist.
+
+Each launch writes `Documents/FillTube.log` inside YouTube's LiveContainer data (Files app → On My iPhone → LiveContainer → Data → Application → YouTube's folder → Documents). Lines look like:
 
 ```
-[FillTube] loaded ... playerView=1 buttons=1 settingsHooks=4/4 captionViews=N captionStateHooks=N
+[FillTube] constructor ran
+[FillTube] state (...): YTPlayerView=1 buttons=1 settingsHooks=4/4 captionViews=N captionStateHooks=N | classes: PresentationData=1 ItemManager=1 ...
 [FillTube] player view YTPlayerView bounds=... videoView=...
 ```
 
-Send those lines from the LiveContainer log. `settingsHooks` below 4/4 means the Settings entry or its icons are missing. `videoView=NOT FOUND` means stretch can't find the picture view. `captionViews=0` and `captionStateHooks=0` mean the caption kill is limited to greying the button.
+No file at all means the dylib isn't loading. `settingsHooks` below 4/4 means the Settings entry or its icons are missing; the `classes:` flags show which class wasn't found. `videoView=NOT FOUND` means stretch can't find the picture. `captionViews=0` and `captionStateHooks=0` mean the caption kill is limited to greying the button.
 
 The subtitle button is matched by its accessibility id/label containing "caption" or "subtitle", so it can miss in non-English UI.
